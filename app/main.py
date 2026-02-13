@@ -1,111 +1,168 @@
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from typing import Optional
+"""
+Biometric Service - Main Application Entry Point
+Handles face recognition, registration, and verification with liveness detection
+"""
 
-# Initialize FastAPI app
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from contextlib import asynccontextmanager
+import logging
+from datetime import datetime
+
+from app.config import settings
+from app.models.database import connect_to_mongo, close_mongo_connection, get_database
+from app.api.biometric import router as biometric_router
+from app.api.schemas import HealthResponse, MetricsResponse
+
+# Configure logging
+logging.basicConfig(
+    level=logging.DEBUG if settings.DEBUG else logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger(__name__)
+
+# Reduce MongoDB driver debug logging
+logging.getLogger("pymongo").setLevel(logging.WARNING)
+logging.getLogger("pymongo.topology").setLevel(logging.WARNING)
+logging.getLogger("pymongo.connection").setLevel(logging.WARNING)
+logging.getLogger("pymongo.serverSelection").setLevel(logging.WARNING)
+
+# Track service start time
+service_start_time = datetime.utcnow()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan context manager for startup and shutdown events"""
+    # Startup
+    logger.info("🚀 Starting BioPay Biometric Service...")
+    logger.info(f"Environment: {'Development' if settings.DEBUG else 'Production'}")
+    
+    try:
+        # Initialize database connections
+        await connect_to_mongo()
+        logger.info("✅ Database initialized")
+        
+        # Log face recognition settings
+        logger.info(f"Face recognition tolerance: {settings.FACE_RECOGNITION_TOLERANCE}")
+        logger.info(f"Liveness detection: {'Enabled' if settings.ENABLE_LIVENESS_DETECTION else 'Disabled'}")
+        
+        logger.info("✅ Biometric Service is ready!")
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to start service: {e}")
+        raise
+    
+    yield
+    
+    # Shutdown
+    logger.info("🛑 Shutting down Biometric Service...")
+    try:
+        await close_mongo_connection()
+        logger.info("✅ Service shutdown complete")
+    except Exception as e:
+        logger.error(f"❌ Error during shutdown: {e}")
+
+
 app = FastAPI(
-    title="Biometric Service API",
-    description="Face Recognition & Verification API",
-    version="1.0.0"
+    title="BioPay Biometric Service",
+    description="Face recognition and verification service with liveness detection for BioPay payment system",
+    version=settings.APP_VERSION,
+    lifespan=lifespan,
+    docs_url="/docs",
+    redoc_url="/redoc"
 )
 
-# Configure CORS
+# CORS Configuration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.CORS_ORIGINS.split(",") if settings.CORS_ORIGINS != "*" else ["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-
-# Response Models
-class HealthResponse(BaseModel):
-    status: str
-    message: str
+# Include routers
+app.include_router(biometric_router)
 
 
-class BiometricResponse(BaseModel):
-    success: bool
-    message: str
-    user_id: Optional[str] = None
-
-
-@app.get("/", response_model=HealthResponse)
+@app.get("/")
 async def root():
     """Root endpoint"""
     return {
+        "service": settings.APP_NAME,
+        "version": settings.APP_VERSION,
         "status": "running",
-        "message": "Biometric Service API is running"
+        "documentation": "/docs",
+        "features": [
+            "Face enrollment with liveness detection",
+            "Face verification",
+            "Face search",
+            "Multiple quality checks"
+        ]
     }
 
 
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
     """Health check endpoint"""
-    return {
-        "status": "healthy",
-        "message": "Service is healthy"
-    }
-
-
-@app.post("/register", response_model=BiometricResponse)
-async def register_face(
-    user_id: str = Form(...),
-    face_image: UploadFile = File(...)
-):
-    """Register a user's face for biometric authentication"""
-    if not face_image.content_type.startswith("image/"):
-        raise HTTPException(status_code=400, detail="File must be an image")
+    try:
+        db = get_database()
+        # Try to ping database
+        await db.command('ping')
+        mongodb_connected = True
+    except:
+        mongodb_connected = False
     
-    # TODO: Implement face registration logic
-    return {
-        "success": True,
-        "message": f"Face registration initiated for user: {user_id}",
-        "user_id": user_id
-    }
+    return HealthResponse(
+        status="healthy" if mongodb_connected else "degraded",
+        service="biometric-service",
+        timestamp=datetime.utcnow(),
+        mongodb_connected=mongodb_connected,
+        s3_configured=False
+    )
 
 
-@app.post("/verify", response_model=BiometricResponse)
-async def verify_face(
-    user_id: str = Form(...),
-    face_image: UploadFile = File(...)
-):
-    """Verify a user's face against stored biometric data"""
-    if not face_image.content_type.startswith("image/"):
-        raise HTTPException(status_code=400, detail="File must be an image")
-    
-    # TODO: Implement face verification logic
-    return {
-        "success": True,
-        "message": f"Face verification initiated for user: {user_id}",
-        "user_id": user_id
-    }
-
-
-@app.get("/user/{user_id}")
-async def get_user_biometric(user_id: str):
-    """Get biometric data for a user"""
-    # TODO: Query database for user's biometric data
-    return {
-        "user_id": user_id,
-        "registered": False,
-        "message": "User biometric data retrieval"
-    }
-
-
-@app.delete("/user/{user_id}")
-async def delete_user_biometric(user_id: str):
-    """Delete a user's biometric data"""
-    # TODO: Delete biometric data from database
-    return {
-        "success": True,
-        "message": f"Biometric data deleted for user: {user_id}",
-        "user_id": user_id
-    }
+@app.get("/metrics", response_model=MetricsResponse)
+async def metrics():
+    """Service metrics endpoint"""
+    try:
+        db = get_database()
+        
+        # Count enrolled faces
+        total_users = await db.faces.count_documents({"is_active": True})
+        total_merchants = await db.merchant_faces.count_documents({"is_active": True})
+        
+        # Count verifications
+        total_verifications = await db.verification_logs.count_documents({})
+        successful_verifications = await db.verification_logs.count_documents({"success": True})
+        failed_verifications = total_verifications - successful_verifications
+        
+        # Calculate uptime
+        uptime_delta = datetime.utcnow() - service_start_time
+        hours = uptime_delta.seconds // 3600
+        minutes = (uptime_delta.seconds % 3600) // 60
+        uptime = f"{uptime_delta.days}d {hours}h {minutes}m"
+        
+        return MetricsResponse(
+            total_users=total_users,
+            total_merchants=total_merchants,
+            total_verifications=total_verifications,
+            successful_verifications=successful_verifications,
+            failed_verifications=failed_verifications,
+            uptime=uptime
+        )
+        
+    except Exception as e:
+        logger.error(f"Error fetching metrics: {e}")
+        return MetricsResponse(uptime="0h 0m")
 
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("app.main:app", host="0.0.0.0", port=8001, reload=True)
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=8001,
+        reload=True
+    )
