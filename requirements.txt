@@ -7,7 +7,8 @@ pydantic==2.9.0
 pydantic-settings==2.5.2
 
 # Build Tools (required for face_recognition_models)
-setuptools>=65.0.0
+# Note: setuptools >= 70 removed pkg_resources which face_recognition_models needs
+setuptools>=65.0.0,<70
 
 # Database
 motor==3.3.2
