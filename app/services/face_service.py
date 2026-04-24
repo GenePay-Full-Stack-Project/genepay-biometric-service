@@ -63,10 +63,13 @@ class FaceRecognitionService:
                     'error': quality_check['message']
                 }
             
+            # Convert BGR (OpenCV) to RGB — face_recognition/dlib requires RGB input
+            rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
             # Detect faces using the configured model
             # For verification, HOG is much faster and usually sufficient
             face_locations = face_recognition.face_locations(
-                image, 
+                rgb_image,
                 model="hog",  # Always use HOG for speed (3-5x faster than CNN)
                 number_of_times_to_upsample=1  # Reduce upsampling for speed
             )
@@ -87,18 +90,20 @@ class FaceRecognitionService:
             
             # Normalize face region for consistent encoding across lighting conditions
             image = self._normalize_face_region(image, face_location)
-            
+            # Re-convert normalized BGR image to RGB for face_recognition library
+            rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
             # Check face size
             top, right, bottom, left = face_location
             face_width = right - left
             face_height = bottom - top
-            
+
             if face_width < settings.MIN_FACE_SIZE or face_height < settings.MIN_FACE_SIZE:
                 return {
                     'success': False,
                     'error': f'Face is too small. Minimum size is {settings.MIN_FACE_SIZE}x{settings.MIN_FACE_SIZE} pixels'
                 }
-            
+
             # Extract face encoding using small model for speed
             # For enrollment, generate MULTIPLE encodings with different jitters to capture variations
             # For verification, use 1 jitter for speed (we'll compare against all stored encodings)
@@ -106,19 +111,19 @@ class FaceRecognitionService:
                 # ENROLLMENT: Generate multiple encodings with different variations
                 # This captures the face in different representations for robust matching
                 all_encodings = []
-                
+
                 # Get base encoding with high jitters
                 encodings_1 = face_recognition.face_encodings(
-                    image, 
+                    rgb_image,
                     known_face_locations=[face_location],
                     model="small",
                     num_jitters=10
                 )
                 if encodings_1:
                     all_encodings.append(encodings_1[0])
-                
-                # Get encoding from slightly brightened image
-                bright_image = cv2.convertScaleAbs(image, alpha=1.2, beta=10)
+
+                # Get encoding from slightly brightened image (RGB)
+                bright_image = cv2.convertScaleAbs(rgb_image, alpha=1.2, beta=10)
                 encodings_2 = face_recognition.face_encodings(
                     bright_image,
                     known_face_locations=[face_location],
@@ -127,9 +132,9 @@ class FaceRecognitionService:
                 )
                 if encodings_2:
                     all_encodings.append(encodings_2[0])
-                
-                # Get encoding from slightly darkened image
-                dark_image = cv2.convertScaleAbs(image, alpha=0.8, beta=-10)
+
+                # Get encoding from slightly darkened image (RGB)
+                dark_image = cv2.convertScaleAbs(rgb_image, alpha=0.8, beta=-10)
                 encodings_3 = face_recognition.face_encodings(
                     dark_image,
                     known_face_locations=[face_location],
@@ -149,7 +154,7 @@ class FaceRecognitionService:
             else:
                 # VERIFICATION: Single encoding with 1 jitter for speed
                 face_encodings = face_recognition.face_encodings(
-                    image, 
+                    rgb_image,
                     known_face_locations=[face_location],
                     model="small",
                     num_jitters=1

@@ -52,10 +52,10 @@ async def enroll_face(request: EnrollFaceRequest):
         # Normalization during encoding helps face work across different lighting/locations
         result = face_service.detect_and_encode_face(image, check_liveness=True)
         
-        if not result['success']:
+        if not result or not result.get('success'):
             return EnrollFaceResponse(
                 success=False,
-                message=result.get('error', 'Face enrollment failed'),
+                message=result.get('error', 'Face enrollment failed') if result else 'Face processing failed',
                 liveness_passed=False
             )
         
@@ -63,7 +63,7 @@ async def enroll_face(request: EnrollFaceRequest):
         db = get_database()
         
         # Prepare face document
-        liveness_result = result.get('liveness_result', {})
+        liveness_result = result.get('liveness_result') or {}
         
         # Store face without user_id initially - will be linked when customer scans QR
         # result['encoding'] contains multiple encodings from different variations
@@ -82,7 +82,7 @@ async def enroll_face(request: EnrollFaceRequest):
             }
         )
         
-        insert_result = await db.faces.insert_one(face_doc.model_dump(by_alias=True, exclude=['id']))
+        insert_result = await db.faces.insert_one(face_doc.model_dump(by_alias=True, exclude={'id'}))
         face_id = str(insert_result.inserted_id)
         
         return EnrollFaceResponse(
@@ -147,7 +147,7 @@ async def verify_face(request: VerifyFaceRequest):
                     liveness_passed=False,
                     metadata={'error': error_message}
                 )
-                log_result = await db.verification_logs.insert_one(log.model_dump(by_alias=True, exclude=['id']))
+                log_result = await db.verification_logs.insert_one(log.model_dump(by_alias=True, exclude={'id'}))
                 logger.info(f"Failed verification log inserted: {log_result.inserted_id}")
             except Exception as e:
                 logger.error(f"Failed to insert verification log: {e}")
@@ -196,7 +196,7 @@ async def verify_face(request: VerifyFaceRequest):
                         liveness_passed=False,
                         metadata={'error': 'No matching face found'}
                     )
-                    log_result = await db.verification_logs.insert_one(log.model_dump(by_alias=True, exclude=['id']))
+                    log_result = await db.verification_logs.insert_one(log.model_dump(by_alias=True, exclude={'id'}))
                     logger.info(f"No match verification log inserted: {log_result.inserted_id}")
                 except Exception as e:
                     logger.error(f"Failed to insert verification log: {e}")
@@ -240,7 +240,7 @@ async def verify_face(request: VerifyFaceRequest):
                     'encodings_checked': verification.get('encodings_checked', 1)
                 }
             )
-            log_result = await db.verification_logs.insert_one(log.model_dump(by_alias=True, exclude=['id']))
+            log_result = await db.verification_logs.insert_one(log.model_dump(by_alias=True, exclude={'id'}))
             logger.info(f"Verification log inserted: {log_result.inserted_id} - User: {entity_id}, Success: {verified}, Confidence: {verification['confidence']:.2%}")
         except Exception as e:
             logger.error(f"Failed to insert verification log: {e}")
@@ -461,7 +461,7 @@ async def search_face(request: SearchFaceRequest):
                         'match_rank': 1
                     }
                 )
-                log_result = await db.verification_logs.insert_one(log.model_dump(by_alias=True, exclude=['id']))
+                log_result = await db.verification_logs.insert_one(log.model_dump(by_alias=True, exclude={'id'}))
                 logger.info(f"Search log inserted: {log_result.inserted_id} - User: {top_match.user_id}, Confidence: {top_match.confidence:.2%}")
             except Exception as e:
                 logger.error(f"Failed to insert search log: {e}")
