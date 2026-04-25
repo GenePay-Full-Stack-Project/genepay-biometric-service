@@ -67,6 +67,7 @@ async def enroll_face(request: EnrollFaceRequest):
         
         # Store face without user_id initially - will be linked when customer scans QR
         # result['encoding'] contains multiple encodings from different variations
+        face_location = result.get('face_location')
         face_doc = FaceDocument(
             user_id=None,  # Will be set during link-face operation
             face_encodings=result['encoding'],  # Multiple encodings for robust matching
@@ -76,7 +77,7 @@ async def enroll_face(request: EnrollFaceRequest):
             is_active=False,  # Not active until linked to user
             metadata={
                 'liveness_checks': liveness_result.get('checks', {}),
-                'face_location': result.get('face_location'),
+                'face_location': list(face_location) if face_location is not None else None,
                 'enrolled_by_merchant': request.merchant_id,  # Audit trail
                 'enrollment_session': str(ObjectId())  # Unique session for QR
             }
@@ -98,7 +99,8 @@ async def enroll_face(request: EnrollFaceRequest):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Face enrollment error: {e}")
+        import traceback
+        logger.error(f"Face enrollment error: {e}\n{traceback.format_exc()}")
         # Handle duplicate key error for user_id (MongoDB unique index constraint)
         if "E11000 duplicate key error" in str(e) and "user_id" in str(e):
             raise HTTPException(
@@ -596,12 +598,7 @@ async def update_face_user(request: UpdateFaceUserRequest):
         
         db = get_database()
         
-        # Check if user already has a face enrolled
-        existing = await db.faces.find_one({"user_id": request.user_id, "is_active": True})
-        if existing:
-            raise HTTPException(status_code=400, detail="User already has a face enrolled")
-        
-        # Find the face record by face_id
+        # Find the new face record by face_id first
         try:
             face_object_id = ObjectId(request.face_id)
         except:
@@ -611,8 +608,14 @@ async def update_face_user(request: UpdateFaceUserRequest):
         if not face:
             raise HTTPException(status_code=404, detail="Face not found")
         
-        if face.get('user_id') is not None:
+        if face.get('user_id') is not None and face.get('user_id') != request.user_id:
             raise HTTPException(status_code=400, detail="This face is already linked to another user")
+        
+        # If user already has an active face, deactivate it before linking the new one
+        await db.faces.update_many(
+            {"user_id": request.user_id, "is_active": True},
+            {"$set": {"is_active": False, "updated_at": datetime.utcnow()}}
+        )
         
         # Update face with user_id and activate it
         result = await db.faces.update_one(
