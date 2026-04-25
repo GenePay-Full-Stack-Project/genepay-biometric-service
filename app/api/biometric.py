@@ -52,10 +52,10 @@ async def enroll_face(request: EnrollFaceRequest):
         # Normalization during encoding helps face work across different lighting/locations
         result = face_service.detect_and_encode_face(image, check_liveness=True)
         
-        if not result['success']:
+        if not result or not result.get('success'):
             return EnrollFaceResponse(
                 success=False,
-                message=result.get('error', 'Face enrollment failed'),
+                message=result.get('error', 'Face enrollment failed') if result else 'Face processing failed',
                 liveness_passed=False
             )
         
@@ -63,10 +63,11 @@ async def enroll_face(request: EnrollFaceRequest):
         db = get_database()
         
         # Prepare face document
-        liveness_result = result.get('liveness_result', {})
+        liveness_result = result.get('liveness_result') or {}
         
         # Store face without user_id initially - will be linked when customer scans QR
         # result['encoding'] contains multiple encodings from different variations
+        face_location = result.get('face_location')
         face_doc = FaceDocument(
             user_id=None,  # Will be set during link-face operation
             face_encodings=result['encoding'],  # Multiple encodings for robust matching
@@ -76,13 +77,13 @@ async def enroll_face(request: EnrollFaceRequest):
             is_active=False,  # Not active until linked to user
             metadata={
                 'liveness_checks': liveness_result.get('checks', {}),
-                'face_location': result.get('face_location'),
+                'face_location': list(face_location) if face_location is not None else None,
                 'enrolled_by_merchant': request.merchant_id,  # Audit trail
                 'enrollment_session': str(ObjectId())  # Unique session for QR
             }
         )
         
-        insert_result = await db.faces.insert_one(face_doc.model_dump(by_alias=True, exclude=['id']))
+        insert_result = await db.faces.insert_one(face_doc.model_dump(by_alias=True, exclude={'id'}))
         face_id = str(insert_result.inserted_id)
         
         return EnrollFaceResponse(
@@ -98,7 +99,8 @@ async def enroll_face(request: EnrollFaceRequest):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Face enrollment error: {e}")
+        import traceback
+        logger.error(f"Face enrollment error: {e}\n{traceback.format_exc()}")
         # Handle duplicate key error for user_id (MongoDB unique index constraint)
         if "E11000 duplicate key error" in str(e) and "user_id" in str(e):
             raise HTTPException(
@@ -147,7 +149,7 @@ async def verify_face(request: VerifyFaceRequest):
                     liveness_passed=False,
                     metadata={'error': error_message}
                 )
-                log_result = await db.verification_logs.insert_one(log.model_dump(by_alias=True, exclude=['id']))
+                log_result = await db.verification_logs.insert_one(log.model_dump(by_alias=True, exclude={'id'}))
                 logger.info(f"Failed verification log inserted: {log_result.inserted_id}")
             except Exception as e:
                 logger.error(f"Failed to insert verification log: {e}")
@@ -196,7 +198,7 @@ async def verify_face(request: VerifyFaceRequest):
                         liveness_passed=False,
                         metadata={'error': 'No matching face found'}
                     )
-                    log_result = await db.verification_logs.insert_one(log.model_dump(by_alias=True, exclude=['id']))
+                    log_result = await db.verification_logs.insert_one(log.model_dump(by_alias=True, exclude={'id'}))
                     logger.info(f"No match verification log inserted: {log_result.inserted_id}")
                 except Exception as e:
                     logger.error(f"Failed to insert verification log: {e}")
@@ -240,7 +242,7 @@ async def verify_face(request: VerifyFaceRequest):
                     'encodings_checked': verification.get('encodings_checked', 1)
                 }
             )
-            log_result = await db.verification_logs.insert_one(log.model_dump(by_alias=True, exclude=['id']))
+            log_result = await db.verification_logs.insert_one(log.model_dump(by_alias=True, exclude={'id'}))
             logger.info(f"Verification log inserted: {log_result.inserted_id} - User: {entity_id}, Success: {verified}, Confidence: {verification['confidence']:.2%}")
         except Exception as e:
             logger.error(f"Failed to insert verification log: {e}")
@@ -461,7 +463,7 @@ async def search_face(request: SearchFaceRequest):
                         'match_rank': 1
                     }
                 )
-                log_result = await db.verification_logs.insert_one(log.model_dump(by_alias=True, exclude=['id']))
+                log_result = await db.verification_logs.insert_one(log.model_dump(by_alias=True, exclude={'id'}))
                 logger.info(f"Search log inserted: {log_result.inserted_id} - User: {top_match.user_id}, Confidence: {top_match.confidence:.2%}")
             except Exception as e:
                 logger.error(f"Failed to insert search log: {e}")
@@ -596,12 +598,7 @@ async def update_face_user(request: UpdateFaceUserRequest):
         
         db = get_database()
         
-        # Check if user already has a face enrolled
-        existing = await db.faces.find_one({"user_id": request.user_id, "is_active": True})
-        if existing:
-            raise HTTPException(status_code=400, detail="User already has a face enrolled")
-        
-        # Find the face record by face_id
+        # Find the new face record by face_id first
         try:
             face_object_id = ObjectId(request.face_id)
         except:
@@ -611,8 +608,14 @@ async def update_face_user(request: UpdateFaceUserRequest):
         if not face:
             raise HTTPException(status_code=404, detail="Face not found")
         
-        if face.get('user_id') is not None:
+        if face.get('user_id') is not None and face.get('user_id') != request.user_id:
             raise HTTPException(status_code=400, detail="This face is already linked to another user")
+        
+        # If user already has an active face, deactivate it before linking the new one
+        await db.faces.update_many(
+            {"user_id": request.user_id, "is_active": True},
+            {"$set": {"is_active": False, "updated_at": datetime.utcnow()}}
+        )
         
         # Update face with user_id and activate it
         result = await db.faces.update_one(

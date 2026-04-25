@@ -1,7 +1,7 @@
 """
 Pydantic schemas for API request/response validation
 """
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional, List, Dict
 from datetime import datetime
 
@@ -11,20 +11,22 @@ class EnrollFaceRequest(BaseModel):
     user_id: Optional[int] = Field(None, description="User ID (for users)")
     merchant_id: Optional[int] = Field(None, description="Merchant ID (for merchants)")
     image_base64: str = Field(..., description="Base64 encoded face image")
-    
-    @validator('image_base64')
-    def validate_image(cls, v):
+
+    @field_validator('image_base64')
+    @classmethod
+    def validate_image(cls, v: str) -> str:
         if not v or len(v) < 100:
             raise ValueError("Invalid image data")
         return v
-    
-    class Config:
-        json_schema_extra = {
+
+    model_config = {
+        "json_schema_extra": {
             "example": {
                 "user_id": 123,
                 "image_base64": "data:image/jpeg;base64,/9j/4AAQSkZJRg..."
             }
         }
+    }
 
 
 class EnrollFaceResponse(BaseModel):
@@ -46,9 +48,10 @@ class VerifyFaceRequest(BaseModel):
     merchant_id: Optional[int] = Field(None, description="Merchant ID to verify against")
     image_base64: str = Field(..., description="Base64 encoded face image for verification")
     require_liveness: bool = Field(True, description="Whether to require liveness check (enabled by default for security)")
-    
-    @validator('image_base64')
-    def validate_image(cls, v):
+
+    @field_validator('image_base64')
+    @classmethod
+    def validate_image(cls, v: str) -> str:
         if not v or len(v) < 100:
             raise ValueError("Invalid image data")
         return v
